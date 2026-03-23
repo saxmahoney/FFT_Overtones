@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Overtone Recovery - Listener Mode</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: sans-serif;
+    background:#222; color:#eee;
+    display:flex; flex-direction:column; align-items:center;
+    min-height:100vh; margin:0; padding: 30px 20px;
+  }
+  
+  .visualizer-container {
+    width: 100%; max-width: 930px;
+    background: #111; border-radius: 8px;
+    margin-bottom: 20px; padding: 20px;
+    border: 1px solid #444; position: relative;
+    text-align: center;
+  }
+  canvas { width: 100%; height: 200px; display: block; background: #000; border-radius: 4px; }
+  
+  .dashboard {
+    display: flex; gap: 20px;
+    width: 100%; max-width: 930px; 
+    background: #333; padding: 20px; border-radius: 8px;
+  }
+  .panel { flex: 1; display: flex; flex-direction: column; gap: 15px; }
+  .panel h3 { margin: 0; font-size: 1.1em; color: #44ff44; text-transform: uppercase; }
+  
+  .overtone-grid {
+    display: grid; grid-template-columns: 1fr 1fr;
+    column-gap: 20px; row-gap: 10px;
+  }
+  .slider-group { display: flex; flex-direction: column; font-size: 0.8em; color: #aaa; }
+  input[type="range"] { width: 100%; cursor: not-allowed; } /* Recovery mode is read-only */
+  
+  #status { font-weight: bold; color: #ff4444; margin-bottom: 10px; }
+  button { padding: 10px; cursor: pointer; background: #44ff44; border: none; font-weight: bold; border-radius: 4px; }
+</style>
+</head>
+<body>
+
+<div class="visualizer-container">
+  <div id="status">Microphone Off</div>
+  <button id="startMic">Start Listening</button>
+  <canvas id="scope"></canvas>
+  <div id="freqInfo" style="margin-top: 10px; font-family: monospace;">Detected Fundamental: --- Hz</div>
+</div>
+
+<div class="dashboard">
+  <div class="panel">
+    <h3>Recovered Overtone Mix</h3>
+    <div class="overtone-grid">
+      <div class="slider-group"><label>1f (Fundamental):</label> <input type="range" id="f1" min="0" max="1" step="0.01" value="0"></div>
+      <div class="slider-group"><label>5f:</label> <input type="range" id="f5" min="0" max="1" step="0.01" value="0"></div>
+      <div class="slider-group"><label>2f:</label> <input type="range" id="f2" min="0" max="1" step="0.01" value="0"></div>
+      <div class="slider-group"><label>6f:</label> <input type="range" id="f6" min="0" max="1" step="0.01" value="0"></div>
+      <div class="slider-group"><label>3f:</label> <input type="range" id="f3" min="0" max="1" step="0.01" value="0"></div>
+      <div class="slider-group"><label>7f:</label> <input type="range" id="f7" min="0" max="1" step="0.01" value="0"></div>
+      <div class="slider-group"><label>4f:</label> <input type="range" id="f4" min="0" max="1" step="0.01" value="0"></div>
+      <div class="slider-group"><label>8f:</label> <input type="range" id="f8" min="0" max="1" step="0.01" value="0"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+let audioCtx;
+let analyser;
+let dataArray;
+let source;
+
+const startBtn = document.getElementById('startMic');
+const statusText = document.getElementById('status');
+const canvas = document.getElementById('scope');
+const canvasCtx = canvas.getContext('2d');
+
+startBtn.addEventListener('click', async () => {
+  if (!audioCtx) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 8192; // Higher resolution for better recovery
+	analyser.smoothingTimeConstant = 0.5;
+    
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      source = audioCtx.createMediaStreamSource(stream);
+      source.connect(analyser);
+      
+      statusText.textContent = "LISTENING...";
+      statusText.style.color = "#44ff44";
+      startBtn.style.display = "none";
+      
+      dataArray = new Uint8Array(analyser.frequencyBinCount);
+      requestAnimationFrame(updateLoop);
+    } catch (err) {
+      statusText.textContent = "Microphone Access Denied";
+      console.error(err);
+    }
+  }
+});
+
+function updateLoop() {
+  requestAnimationFrame(updateLoop);
+  analyser.getByteFrequencyData(dataArray);
+  
+  // 1. DRAW VISUALIZER
+  drawVisualizer();
+  
+  // 2. DETECT FUNDAMENTAL (Peak Detection)
+  let peakIndex = 0;
+  let maxAmp = 0;
+  // Focus detection on likely musical ranges (e.g., above index 20 to avoid low rumble)
+  for (let i = 20; i < dataArray.length; i++) {
+    if (dataArray[i] > maxAmp) {
+      maxAmp = dataArray[i];
+      peakIndex = i;
+    }
+  }
+
+  // Only attempt recovery if there is a significant signal
+  if (maxAmp > 50) {
+    const fundamentalFreq = peakIndex * (audioCtx.sampleRate / analyser.fftSize);
+    document.getElementById('freqInfo').textContent = `Detected Fundamental: ${fundamentalFreq.toFixed(1)} Hz`;
+    recoverOvertones(fundamentalFreq);
+  }
+}
+
+function recoverOvertones(fundamental) {
+  const sampleRate = audioCtx.sampleRate;
+  const fftSize = analyser.fftSize;
+  const binResolution = sampleRate / fftSize;
+
+  // We find the fundamental bin first as our baseline (100% / 1.0)
+  const baseBin = Math.round(fundamental / binResolution);
+  const baseAmp = dataArray[baseBin] || 1;
+
+  for (let h = 1; h <= 8; h++) {
+    const harmonicFreq = fundamental * h;
+	// If problem, delete until next comment block and uncomment those lines
+	const targetBin = Math.round(harmonicFreq / binResolution);
+	let maxNearbyAmp = 0;
+	
+	// Check the target bin and its immediate neighbors
+	for (let i = targetBin - 1; i <= targetBin + 1; i++) {
+	    if (dataArray[i] > maxNearbyAmp) {
+	        maxNearbyAmp = dataArray[i];
+	    }
+	}
+	const amp = maxNearbyAmp;
+    // const harmonicBin = Math.round(harmonicFreq / binResolution);
+    // 
+    // // Read the amplitude at the harmonic bin
+    // const amp = dataArray[harmonicBin] || 0;
+    
+    // Normalize relative to the fundamental
+    let relativeGain = amp / baseAmp;
+    if (relativeGain > 1) relativeGain = 1;
+    if (relativeGain < 0.05) relativeGain = 0; // Filter out noise
+
+    document.getElementById(`f${h}`).value = relativeGain;
+  }
+}
+
+function drawVisualizer() {
+  canvasCtx.fillStyle = '#000';
+  canvasCtx.fillRect(0, 0, canvas.width, canvas.height);
+  
+  const barWidth = (canvas.width / dataArray.length) * 4;
+  let x = 0;
+  for(let i = 0; i < dataArray.length / 4; i++) { // Only draw lower frequencies
+    const h = (dataArray[i] / 255) * canvas.height;
+    canvasCtx.fillStyle = `hsl(${i/5}, 100%, 50%)`;
+    canvasCtx.fillRect(x, canvas.height - h, barWidth, h);
+    x += barWidth + 1;
+  }
+}
+</script>
+</body>
+</html>
